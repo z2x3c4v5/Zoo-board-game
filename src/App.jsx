@@ -6,6 +6,68 @@ const NUMBER_WORDS = {
   6: 'six', 7: 'seven', 8: 'eight', 9: 'nine', 10: 'ten'
 };
 
+// 숫자/서수 정규화 사전 (first/1st = 1, fifteenth/15th = 15 등)
+const NUMBER_NORMALIZE = {
+  'one': '1', '1st': '1', 'first': '1',
+  'two': '2', '2nd': '2', 'second': '2',
+  'three': '3', '3rd': '3', 'third': '3',
+  'four': '4', '4th': '4', 'fourth': '4',
+  'five': '5', '5th': '5', 'fifth': '5',
+  'six': '6', '6th': '6', 'sixth': '6',
+  'seven': '7', '7th': '7', 'seventh': '7',
+  'eight': '8', '8th': '8', 'eighth': '8',
+  'nine': '9', '9th': '9', 'ninth': '9',
+  'ten': '10', '10th': '10', 'tenth': '10',
+  'eleven': '11', 'eleventh': '11', '11th': '11',
+  'twelve': '12', 'twelfth': '12', '12th': '12',
+  'thirteen': '13', 'thirteenth': '13', '13th': '13',
+  'fourteen': '14', 'fourteenth': '14', '14th': '14',
+  'fifteen': '15', 'fifteenth': '15', '15th': '15',
+};
+
+// 단어 뜻 사전 (4단원 어휘 + 의문사 + 기본 기능어 — 이 게임 한정)
+const WORD_MEANING = {
+  'how': '얼마나/어떻게',
+  'many': '많은 (수가)',
+  'how many': '몇 마리 (몇 개)',
+  'monkey': '원숭이',
+  'monkeys': '원숭이들',
+  'rabbit': '토끼',
+  'rabbits': '토끼들',
+  'dog': '개',
+  'dogs': '개들',
+  'elephant': '코끼리',
+  'elephants': '코끼리들',
+  'kangaroo': '캥거루',
+  'kangaroos': '캥거루들',
+  'cat': '고양이',
+  'cats': '고양이들',
+  'panda': '판다',
+  'pandas': '판다들',
+  'pig': '돼지',
+  'pigs': '돼지들',
+  'one': '하나 (1)',
+  'two': '둘 (2)',
+  'three': '셋 (3)',
+  'four': '넷 (4)',
+  'five': '다섯 (5)',
+  'six': '여섯 (6)',
+  'seven': '일곱 (7)',
+  'eight': '여덟 (8)',
+  'nine': '아홉 (9)',
+  'ten': '열 (10)',
+  'a': '하나의',
+  'an': '하나의',
+  'the': '그',
+  'is': '~이다',
+  'are': '~이다 (복수)',
+  'do': '~하다',
+  'does': '~하다',
+};
+
+// 빈칸/매칭에서 제외할 기능어 (관사·be동사 등)
+const STOPWORDS = new Set(['a', 'an', 'the', 'is', 'are', 'do', 'does', 'of', 'to']);
+
 const BOARD_DATA = [
   { id: 0, type: 'start', label: 'START' },
   { id: 1, type: 'normal', animal: 'monkey', count: 3, emoji: '🐒' },
@@ -39,19 +101,125 @@ const BOARD_DATA = [
 ];
 
 const PLURAL_MAP = {
-  monkey: 'monkeys', panda: 'pandas', dog: 'dogs', 
+  monkey: 'monkeys', panda: 'pandas', dog: 'dogs',
   elephant: 'elephants', kangaroo: 'kangaroos', cat: 'cats',
   rabbit: 'rabbits', pig: 'pigs'
 };
 
 const RPS_EMOJI = { rock: '✊', paper: '🖐️', scissors: '✌️' };
 
+// --- 음성 인식 유틸 ---
+
+// 편집거리 (Levenshtein distance) — 발음이 한두 글자 어긋나도 통과
+function lev(a, b) {
+  if (a === b) return 0;
+  if (!a.length) return b.length;
+  if (!b.length) return a.length;
+  const dp = Array.from({ length: a.length + 1 }, (_, i) => [i]);
+  for (let j = 1; j <= b.length; j++) dp[0][j] = j;
+  for (let i = 1; i <= a.length; i++) {
+    for (let j = 1; j <= b.length; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      dp[i][j] = Math.min(
+        dp[i - 1][j] + 1,
+        dp[i][j - 1] + 1,
+        dp[i - 1][j - 1] + cost
+      );
+    }
+  }
+  return dp[a.length][b.length];
+}
+
+// 퍼지 단어 비교 — 단어 길이에 따라 허용 편집거리 조정
+function fuzzyEq(spoken, target) {
+  if (!spoken || !target) return false;
+  if (spoken === target) return true;
+  // 숫자는 정확히
+  if (/^\d+$/.test(target) || /^\d+$/.test(spoken)) return spoken === target;
+  const allow = target.length <= 3 ? 0 : target.length <= 5 ? 1 : 2;
+  return lev(spoken, target) <= allow;
+}
+
+// 토큰화 + 숫자/서수 정규화
+function tokenize(text) {
+  return (text || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter(Boolean)
+    .map(w => NUMBER_NORMALIZE[w] || w);
+}
+
+// 핵심 단어 매칭 — 75% 통과 기준
+function matchAggregate(spokenList, target, threshold = 0.75) {
+  const targetTokens = tokenize(target).filter(t => !STOPWORDS.has(t));
+  if (targetTokens.length === 0) return true;
+
+  // 후보 여러 개 중 최고 점수 사용
+  let best = 0;
+  for (const spoken of spokenList) {
+    const spokenTokens = tokenize(spoken);
+    let matched = 0;
+    for (const t of targetTokens) {
+      if (spokenTokens.some(s => fuzzyEq(s, t))) matched++;
+    }
+    const ratio = matched / targetTokens.length;
+    if (ratio > best) best = ratio;
+  }
+  return best >= threshold;
+}
+
+// 한국어가 섞여 있으면 영어 엔진이 어색하게 읽으므로 차단
+function hasKorean(text) {
+  return /[ㄱ-ㆎ가-힣]/.test(text);
+}
+
+// 4선 영어 공책 SVG 배경 + 단어 클릭 가능한 텍스트
+function FourLineText({ tokens, onWordClick, highlightWords = [] }) {
+  // tokens: [{word, isKey?}] — isKey 표시면 초록 강조
+  return (
+    <div className="relative inline-block px-2 py-1">
+      <svg
+        className="absolute inset-0 w-full h-full pointer-events-none"
+        preserveAspectRatio="none"
+        viewBox="0 0 100 100"
+      >
+        {/* 위 회색 (대문자 윗선) */}
+        <line x1="0" y1="18" x2="100" y2="18" stroke="#cbd5e1" strokeWidth="0.6" />
+        {/* 가운데 회색 점선 (소문자 위쪽) */}
+        <line x1="0" y1="42" x2="100" y2="42" stroke="#94a3b8" strokeWidth="0.5" strokeDasharray="2 1.5" />
+        {/* 빨강 기준선 (베이스라인) */}
+        <line x1="0" y1="78" x2="100" y2="78" stroke="#dc2626" strokeWidth="1.2" />
+        {/* 아래 회색 (디센더선) */}
+        <line x1="0" y1="96" x2="100" y2="96" stroke="#cbd5e1" strokeWidth="0.6" />
+      </svg>
+      <span className="relative z-10 text-3xl font-black leading-[1.4] tracking-wide flex flex-wrap justify-center gap-x-2">
+        {tokens.map((tk, i) => {
+          const norm = tk.word.toLowerCase().replace(/[^a-z0-9]/g, '');
+          const isKey = highlightWords.includes(norm) || tk.isKey;
+          return (
+            <button
+              key={i}
+              type="button"
+              onClick={() => onWordClick && onWordClick(tk.word)}
+              className={`inline-block px-0.5 transition-colors hover:bg-yellow-100 rounded
+                ${isKey ? 'text-emerald-600' : 'text-slate-800'}`}
+            >
+              {tk.word}
+            </button>
+          );
+        })}
+      </span>
+    </div>
+  );
+}
+
 export default function App() {
-  const [gameState, setGameState] = useState('lobby'); 
+  const [gameState, setGameState] = useState('lobby');
   const [turn, setTurn] = useState('player');
-  const [gameMode, setGameMode] = useState('answerOnly'); 
-  
-  const [rpsState, setRpsState] = useState('idle'); 
+  const [gameMode, setGameMode] = useState('answerOnly');
+
+  const [rpsState, setRpsState] = useState('idle');
   const [playerChoice, setPlayerChoice] = useState(null);
   const [aiChoice, setAiChoice] = useState(null);
   const [rpsResult, setRpsResult] = useState('');
@@ -62,30 +230,43 @@ export default function App() {
   const [aiRest, setAiRest] = useState(false);
   const [diceResult, setDiceResult] = useState(null);
   const [isMoving, setIsMoving] = useState(false);
-  
+
   const [isRollingDice, setIsRollingDice] = useState(false);
-  const [showDicePopup, setShowDicePopup] = useState(false); 
+  const [showDicePopup, setShowDicePopup] = useState(false);
   const [diceDisplay, setDiceDisplay] = useState(1);
   const [diceTransform, setDiceTransform] = useState('rotateX(0deg) rotateY(0deg)');
-  
-  const [actionPopup, setActionPopup] = useState(null); 
-  const [catchEvent, setCatchEvent] = useState(null); 
+
+  const [actionPopup, setActionPopup] = useState(null);
+  const [catchEvent, setCatchEvent] = useState(null);
 
   const [currentTask, setCurrentTask] = useState(null);
   const [isListening, setIsListening] = useState(false);
-  const [spokenText, setSpokenText] = useState('');
   const [feedback, setFeedback] = useState('');
   const [aiSpeechText, setAiSpeechText] = useState('');
-  
+  const [attempts, setAttempts] = useState(0);
+  const [showAnswer, setShowAnswer] = useState(false);
+
+  // 그림 클릭 미리보기 팝업 (쓰기 연습용)
+  const [previewCell, setPreviewCell] = useState(null);
+  // 단어 클릭 시 뜻 표시
+  const [wordTip, setWordTip] = useState(null);
+
   const recognitionRef = useRef(null);
-  const currentTaskRef = useRef(null); 
+  const currentTaskRef = useRef(null);
   const isListeningRef = useRef(false);
+  const attemptsRef = useRef(0);
 
   useEffect(() => {
     currentTaskRef.current = currentTask;
   }, [currentTask]);
 
+  useEffect(() => {
+    attemptsRef.current = attempts;
+  }, [attempts]);
+
+  // 한국어 자동음성 차단 — 영어 엔진이 한국어 안내문 읽던 어색함 제거
   const speakText = (text, rate = 0.8) => {
+    if (!text || hasKorean(text)) return;
     if ('speechSynthesis' in window) {
       window.speechSynthesis.cancel();
       const utterance = new SpeechSynthesisUtterance(text);
@@ -95,14 +276,24 @@ export default function App() {
     }
   };
 
+  // 단어 하나만 발음 + 뜻 팝업
+  const speakWord = (word) => {
+    const clean = word.toLowerCase().replace(/[^a-z]/g, '');
+    if (!clean) return;
+    speakText(clean, 0.7);
+    const meaning = WORD_MEANING[clean] || '';
+    setWordTip({ word: clean, meaning });
+    setTimeout(() => setWordTip(null), 2200);
+  };
+
   const handleRPS = (choice) => {
     if (rpsState !== 'idle') return;
     setPlayerChoice(choice);
     setRpsState('animating');
-    
+
     let counter = 0;
     const choices = ['rock', 'paper', 'scissors'];
-    
+
     const interval = setInterval(() => {
       setAiChoice(choices[counter % 3]);
       counter++;
@@ -112,7 +303,7 @@ export default function App() {
       clearInterval(interval);
       const finalAiChoice = choices[Math.floor(Math.random() * 3)];
       setAiChoice(finalAiChoice);
-      
+
       let result = '';
       if (choice === finalAiChoice) result = 'draw';
       else if (
@@ -124,7 +315,7 @@ export default function App() {
       } else {
         result = 'lose';
       }
-      
+
       setRpsResult(result);
       setRpsState('result');
 
@@ -145,7 +336,7 @@ export default function App() {
   useEffect(() => {
     if (gameState === 'playing' && turn === 'ai' && !actionPopup && !catchEvent) {
       const timer = setTimeout(() => {
-         executeAiTurn();
+        executeAiTurn();
       }, 1500);
       return () => clearTimeout(timer);
     }
@@ -159,21 +350,21 @@ export default function App() {
     let targetX = extraX;
     let targetY = extraY;
 
-    switch(finalDice) {
-        case 1: break; 
-        case 2: targetY -= 90; break; 
-        case 3: targetY += 180; break; 
-        case 4: targetY += 90; break; 
-        case 5: targetX -= 90; break; 
-        case 6: targetX += 90; break; 
+    switch (finalDice) {
+      case 1: break;
+      case 2: targetY -= 90; break;
+      case 3: targetY += 180; break;
+      case 4: targetY += 90; break;
+      case 5: targetX -= 90; break;
+      case 6: targetX += 90; break;
     }
     return `rotateX(${targetX}deg) rotateY(${targetY}deg)`;
   };
 
   const animateMove = (who, currentPos, targetPos) => {
     if (currentPos === targetPos) {
-       processCellLanding(targetPos, who);
-       return;
+      processCellLanding(targetPos, who);
+      return;
     }
     const nextPos = currentPos < targetPos ? currentPos + 1 : currentPos - 1;
     if (who === 'player') setPlayerPos(nextPos);
@@ -183,29 +374,29 @@ export default function App() {
   };
 
   const startDiceRoll = (who, finalDice, newPos) => {
-    setShowDicePopup(true); 
-    setDiceTransform('rotateX(0deg) rotateY(0deg)'); 
-    
+    setShowDicePopup(true);
+    setDiceTransform('rotateX(0deg) rotateY(0deg)');
+
     setTimeout(() => {
-        setIsRollingDice(true); 
-        setDiceDisplay(finalDice);
-        setDiceTransform(getDiceTransform(finalDice));
+      setIsRollingDice(true);
+      setDiceDisplay(finalDice);
+      setDiceTransform(getDiceTransform(finalDice));
     }, 50);
 
     setTimeout(() => {
-        setIsRollingDice(false); 
-        setDiceResult(`🎲 ${who === 'player' ? '나온 숫자' : 'AI 숫자'}: ${finalDice}`);
-        
-        setTimeout(() => {
-            setShowDicePopup(false);
-            animateMove(who, who === 'player' ? playerPos : aiPos, newPos);
-        }, 1500); 
-    }, 1550); 
+      setIsRollingDice(false);
+      setDiceResult(`🎲 ${who === 'player' ? '나온 숫자' : 'AI 숫자'}: ${finalDice}`);
+
+      setTimeout(() => {
+        setShowDicePopup(false);
+        animateMove(who, who === 'player' ? playerPos : aiPos, newPos);
+      }, 1500);
+    }, 1550);
   };
 
   const handlePlayerTurn = () => {
     if ('speechSynthesis' in window) {
-       window.speechSynthesis.speak(new SpeechSynthesisUtterance(''));
+      window.speechSynthesis.speak(new SpeechSynthesisUtterance(''));
     }
 
     if (playerRest) {
@@ -236,10 +427,10 @@ export default function App() {
     if (pos !== 0 && pos !== BOARD_DATA.length - 1) {
       if (who === 'player' && pos === aiPos) {
         setCatchEvent({ victim: 'ai', who, pos });
-        return; 
+        return;
       } else if (who === 'ai' && pos === playerPos) {
         setCatchEvent({ victim: 'player', who, pos });
-        return; 
+        return;
       }
     }
     continueCellLanding(pos, who);
@@ -249,14 +440,14 @@ export default function App() {
     const { victim, who, pos } = catchEvent;
     if (victim === 'ai') setAiPos(0);
     if (victim === 'player') setPlayerPos(0);
-    
+
     setCatchEvent(null);
     continueCellLanding(pos, who);
   };
 
   const continueCellLanding = (pos, who) => {
     const cell = BOARD_DATA[pos];
-    
+
     if (cell.type === 'finish') {
       setIsMoving(false);
       setGameState('finished');
@@ -278,7 +469,7 @@ export default function App() {
 
   const handleActionPopupClose = () => {
     const { action, who, pos } = actionPopup;
-    setActionPopup(null); 
+    setActionPopup(null);
 
     let finalPos = pos;
     if (action === 'forward2') {
@@ -290,8 +481,8 @@ export default function App() {
     } else if (action === 'rest') {
       if (who === 'player') setPlayerRest(true);
       else setAiRest(true);
-      setIsMoving(false); 
-      setTurn(who === 'player' ? 'ai' : 'player'); 
+      setIsMoving(false);
+      setTurn(who === 'player' ? 'ai' : 'player');
     }
   };
 
@@ -321,27 +512,32 @@ export default function App() {
     }
   };
 
-  const startSpeakingTask = (cell) => {
-    setGameState('speaking');
-    setSpokenText('');
-    setFeedback('');
-    
+  // 셀로부터 question/answer 만들기
+  const buildTask = (cell) => {
     const countWord = NUMBER_WORDS[cell.count];
     const animalPlural = PLURAL_MAP[cell.animal];
     const animalWord = cell.count > 1 ? animalPlural : cell.animal;
-    
     const question = `How many ${animalPlural}?`;
     const answer = `${countWord} ${animalWord}`;
     const answerDigits = `${cell.count} ${animalWord}`;
-    
-    setCurrentTask({
-      cell, question, answer, answerDigits, animalPlural, mode: gameMode
-    });
+    return { question, answer, answerDigits, animalPlural, animalWord, countWord };
+  };
 
+  const startSpeakingTask = (cell) => {
+    setGameState('speaking');
+    setFeedback('');
+    setAttempts(0);
+    setShowAnswer(false);
+    attemptsRef.current = 0;
+
+    const t = buildTask(cell);
+    setCurrentTask({ cell, ...t, mode: gameMode });
+
+    // 한국어 안내는 speakText로 절대 흘리지 않음. 영어만 미리 들려줌.
     if (gameMode === 'qna') {
-      setTimeout(() => speakText("그림을 보고 질문과 대답을 만들어보세요!"), 500);
+      setTimeout(() => speakText(`${t.question} ${t.answer}.`), 500);
     } else {
-      setTimeout(() => speakText(question), 500);
+      setTimeout(() => speakText(t.question), 500);
     }
   };
 
@@ -355,17 +551,15 @@ export default function App() {
     }
 
     if (recognitionRef.current) {
-      try {
-        recognitionRef.current.abort();
-      } catch (e) {
-        // 무시
-      }
+      try { recognitionRef.current.abort(); } catch (e) {}
     }
 
     const recognition = new SpeechRecognition();
     recognition.continuous = false;
     recognition.lang = 'en-US';
     recognition.interimResults = false;
+    // 여러 후보 동시 검사 — 1순위만 보던 것을 5개 후보 전부 검사
+    recognition.maxAlternatives = 5;
 
     recognition.onstart = () => {
       isListeningRef.current = true;
@@ -373,9 +567,12 @@ export default function App() {
     };
 
     recognition.onresult = (event) => {
-      const transcript = event.results[0][0].transcript;
-      setSpokenText(transcript);
-      checkAnswerRef(transcript, currentTaskRef.current);
+      const alts = [];
+      const res = event.results[0];
+      for (let i = 0; i < res.length; i++) {
+        alts.push(res[i].transcript);
+      }
+      checkAnswerRef(alts, currentTaskRef.current);
     };
 
     recognition.onerror = (event) => {
@@ -383,7 +580,7 @@ export default function App() {
       isListeningRef.current = false;
       setIsListening(false);
       if (event.error !== 'no-speech' && event.error !== 'aborted') {
-          setFeedback("마이크 연결이 불안정합니다. 다시 버튼을 눌러주세요! 🎤");
+        setFeedback("마이크 연결이 불안정합니다. 다시 버튼을 눌러주세요! 🎤");
       }
     };
 
@@ -395,7 +592,6 @@ export default function App() {
     recognitionRef.current = recognition;
 
     try {
-      setSpokenText('');
       setFeedback('');
       isListeningRef.current = true;
       setIsListening(true);
@@ -407,79 +603,105 @@ export default function App() {
     }
   };
 
-  const checkAnswerRef = (transcript, task) => {
+  const passToAiTurn = (extraMsg) => {
+    setTimeout(() => {
+      setGameState('playing');
+      setTurn('ai');
+    }, extraMsg ? 2500 : 1500);
+  };
+
+  const checkAnswerRef = (alternatives, task) => {
     if (!task) return;
 
-    const normalize = (str) => str.toLowerCase().replace(/[^a-z0-9]/g, '').trim();
-    const spoken = normalize(transcript);
-    
-    const ansWords = normalize(task.answer);
-    const ansDigits = normalize(task.answerDigits);
-    const qWords = normalize(`how many ${task.animalPlural}`);
-
-    let isCorrect = false;
+    // qna 모드: question + answer 모두 75% 이상이어야 통과
+    // answerOnly 모드: answer만 75%
+    let isCorrect;
     if (task.mode === 'qna') {
-       isCorrect = spoken.includes(qWords) && (spoken.includes(ansWords) || spoken.includes(ansDigits));
+      const qOk = matchAggregate(alternatives, task.question);
+      const aOk =
+        matchAggregate(alternatives, task.answer) ||
+        matchAggregate(alternatives, task.answerDigits);
+      isCorrect = qOk && aOk;
     } else {
-       isCorrect = spoken.includes(ansWords) || spoken.includes(ansDigits);
+      isCorrect =
+        matchAggregate(alternatives, task.answer) ||
+        matchAggregate(alternatives, task.answerDigits);
     }
 
     if (isCorrect) {
       setFeedback("Excellent! 정답입니다! 🎉 (AI 턴으로 넘어갑니다)");
       speakText("Excellent!");
-      setTimeout(() => {
-        setGameState('playing');
-        setTurn('ai');
-      }, 2500);
+      passToAiTurn(true);
+      return;
+    }
+
+    // 3번 시도 후 자동 통과
+    const next = attemptsRef.current + 1;
+    attemptsRef.current = next;
+    setAttempts(next);
+
+    if (next >= 3) {
+      setFeedback("정말 잘했어요! 🌟 다음 차례로 넘어갈게요!");
+      speakText("Great job!");
+      passToAiTurn(true);
     } else {
-      setFeedback(`앗, 다시 해볼까요? (인식된 말: ${transcript})`);
+      setFeedback(`다시 한 번 해볼까요? (${next}/3회) 🌱`);
     }
   };
 
   const startAiSpeakingTask = (cell) => {
     setGameState('aiSpeaking');
     setAiSpeechText('음... 🤔');
-    
-    const countWord = NUMBER_WORDS[cell.count];
-    const animalWord = cell.count > 1 ? PLURAL_MAP[cell.animal] : cell.animal;
-    const question = `How many ${PLURAL_MAP[cell.animal]}?`;
-    const answer = `${countWord} ${animalWord}.`;
 
-    setCurrentTask({ cell, question, expectedAnswer: answer });
+    const t = buildTask(cell);
+    const answerSpoken = `${t.countWord} ${t.animalWord}.`;
+    setCurrentTask({ cell, ...t, expectedAnswer: answerSpoken });
+
+    const isQna = gameMode === 'qna';
 
     setTimeout(() => {
-      setAiSpeechText(`"${question}"`);
-      speakText(question);
-
-      setTimeout(() => {
-        setAiSpeechText(`"${answer}"`);
-        speakText(answer);
+      if (isQna) {
+        // 질문&대답 모드 → AI도 질문 + 대답
+        setAiSpeechText(`"${t.question}"`);
+        speakText(t.question);
 
         setTimeout(() => {
-          setAiSpeechText('내 차례 끝!');
+          setAiSpeechText(`"${answerSpoken}"`);
+          speakText(answerSpoken);
+
           setTimeout(() => {
-             setGameState('playing');
-             setTurn('player');
-          }, 1000);
+            setAiSpeechText('AI 차례 끝! 이제 네가 주사위를 굴려서 정답을 말해봐!');
+            setTimeout(() => {
+              setGameState('playing');
+              setTurn('player');
+            }, 4000);
+          }, 2500);
         }, 2500);
-      }, 2500);
+      } else {
+        // 대답만 모드 → AI도 대답만
+        setAiSpeechText(`"${answerSpoken}"`);
+        speakText(answerSpoken);
+
+        setTimeout(() => {
+          setAiSpeechText('AI 차례 끝! 이제 네가 주사위를 굴려서 정답을 말해봐!');
+          setTimeout(() => {
+            setGameState('playing');
+            setTurn('player');
+          }, 4000);
+        }, 2500);
+      }
     }, 1000);
   };
 
   const skipSpeaking = () => {
-     setGameState('playing');
-     setTurn('ai');
+    setGameState('playing');
+    setTurn('ai');
   };
 
+  // 그림 클릭 → 큰 글씨 미리보기 팝업 (쓰기 연습용)
   const handleCellClick = (cell) => {
     if (cell.type !== 'normal' || (gameState !== 'playing' && gameState !== 'lobby') || isMoving || showDicePopup || actionPopup || catchEvent) return;
-    
-    const countWord = NUMBER_WORDS[cell.count];
-    const animalWord = cell.count > 1 ? PLURAL_MAP[cell.animal] : cell.animal;
-    const question = `How many ${PLURAL_MAP[cell.animal]}?`;
-    const answer = `${countWord} ${animalWord}.`;
-
-    speakText(`${question} ... ${answer}`);
+    setPreviewCell(cell);
   };
 
   const resetGame = () => {
@@ -490,7 +712,7 @@ export default function App() {
     setRpsState('idle');
     setPlayerChoice(null);
     setAiChoice(null);
-    setGameState('lobby'); 
+    setGameState('lobby');
     setTurn('player');
     setDiceResult(null);
     setShowDicePopup(false);
@@ -498,15 +720,15 @@ export default function App() {
     setCatchEvent(null);
   };
 
+  // 모드 토글 시 보드 순서 유지 — 위치/진행 상태를 보존
   const handleModeChange = (mode) => {
     setGameMode(mode);
-    resetGame();
   };
 
   const renderDots = (num) => {
     const dot = "w-6 h-6 bg-slate-700 rounded-full shadow-inner";
     const redDot = "w-8 h-8 bg-red-600 rounded-full shadow-inner";
-    switch(num) {
+    switch (num) {
       case 1: return <div className={redDot}></div>;
       case 2: return <div className="w-full h-full p-4 flex flex-col justify-between"><div className={`${dot} self-start`}></div><div className={`${dot} self-end`}></div></div>;
       case 3: return <div className="w-full h-full p-4 flex flex-col justify-between items-center"><div className={`${dot} self-start`}></div><div className={dot}></div><div className={`${dot} self-end`}></div></div>;
@@ -521,12 +743,16 @@ export default function App() {
     fontFamily: "'Comic Sans MS', 'Chalkboard SE', 'Comic Neue', 'NanumSquareRound', 'Nanum Gothic', sans-serif"
   };
 
+  // 키 단어 강조용 (정답에서 stopwords 제외한 단어들)
+  const keyWordsOf = (str) =>
+    tokenize(str).filter(t => !STOPWORDS.has(t));
+
   return (
     <div className="min-h-screen bg-emerald-800 text-gray-800 p-4 flex flex-col items-center relative overflow-hidden" style={appStyle}>
-      
+
       <style>{`
         @import url('https://hangeul.pstatic.net/hangeul_static/css/nanum-square-round.css');
-        
+
         .perspective-1000 { perspective: 1000px; }
         .cube-container {
           transform-style: preserve-3d;
@@ -560,17 +786,17 @@ export default function App() {
         <h1 className="text-2xl md:text-3xl font-black text-emerald-800 uppercase tracking-wider flex items-center gap-2">
           🦁 Zoo Board Game
         </h1>
-        
+
         <div className="flex flex-col sm:flex-row gap-3 items-center">
           <div className="flex bg-gray-200 p-1 rounded-xl shadow-inner">
-            <button 
-              onClick={() => handleModeChange('answerOnly')} 
+            <button
+              onClick={() => handleModeChange('answerOnly')}
               className={`px-4 py-2 rounded-lg font-bold transition-all text-sm md:text-base ${gameMode === 'answerOnly' ? 'bg-white shadow-sm text-emerald-800 border border-gray-300' : 'text-gray-500 hover:text-gray-700'}`}
             >
               대답만 하기
             </button>
-            <button 
-              onClick={() => handleModeChange('qna')} 
+            <button
+              onClick={() => handleModeChange('qna')}
               className={`px-4 py-2 rounded-lg font-bold transition-all text-sm md:text-base ${gameMode === 'qna' ? 'bg-white shadow-sm text-emerald-800 border border-gray-300' : 'text-gray-500 hover:text-gray-700'}`}
             >
               질문&대답 같이
@@ -600,33 +826,33 @@ export default function App() {
               <span className="bg-red-100 text-red-800 px-3 py-1 rounded-lg border-2 border-red-300 shadow-sm flex items-center gap-2 animate-pulse">🤖 AI 차례...</span>
             )}
           </div>
-          
+
           <div className="w-1/3 flex justify-center">
             {diceResult && !showDicePopup && (
-               <div className="text-lg bg-emerald-100 text-emerald-900 border-2 border-emerald-300 px-6 py-2 rounded-xl font-black shadow-sm transition-all">
-                 {diceResult}
-               </div>
+              <div className="text-lg bg-emerald-100 text-emerald-900 border-2 border-emerald-300 px-6 py-2 rounded-xl font-black shadow-sm transition-all">
+                {diceResult}
+              </div>
             )}
           </div>
-          
+
           <div className="w-1/3 flex justify-end relative">
             {turn === 'player' && !isMoving && !showDicePopup && !actionPopup && !catchEvent && !playerRest && (
               <div className="absolute -top-10 right-0 md:-top-12 whitespace-nowrap text-xs md:text-sm font-bold text-amber-700 animate-bounce bg-amber-100 px-3 py-1 rounded-full border border-amber-300 shadow-sm z-20">
                 내가 주사위 굴리기 버튼을 눌러서 시작해봅시다! 👇
               </div>
             )}
-            <button 
-              onClick={handlePlayerTurn} 
+            <button
+              onClick={handlePlayerTurn}
               disabled={(turn !== 'player' && !playerRest) || isMoving || showDicePopup || actionPopup || catchEvent}
-              className={`px-8 py-3 rounded-2xl font-black text-white text-lg transition-all 
+              className={`px-8 py-3 rounded-2xl font-black text-white text-lg transition-all
                 ${playerRest && turn === 'player'
                   ? 'bg-purple-500 hover:bg-purple-400 border-2 border-purple-600 shadow-[0_5px_0_0_rgba(147,51,234,1)] active:shadow-none active:translate-y-1 cursor-pointer animate-pulse'
                   : turn === 'player' && !isMoving && !showDicePopup && !actionPopup && !catchEvent
-                    ? 'bg-amber-500 hover:bg-amber-400 border-2 border-amber-600 shadow-[0_5px_0_0_rgba(180,83,9,1)] active:shadow-none active:translate-y-1 cursor-pointer' 
+                    ? 'bg-amber-500 hover:bg-amber-400 border-2 border-amber-600 shadow-[0_5px_0_0_rgba(180,83,9,1)] active:shadow-none active:translate-y-1 cursor-pointer'
                     : 'bg-gray-400 border-2 border-gray-500 shadow-[0_5px_0_0_rgba(107,114,128,1)] cursor-not-allowed opacity-80'}`}
             >
-              {playerRest && turn === 'player' 
-                ? '쿨쿨.. 한 번 쉬기 (턴 넘기기) 💤' 
+              {playerRest && turn === 'player'
+                ? '쿨쿨.. 한 번 쉬기 (턴 넘기기) 💤'
                 : (isMoving || showDicePopup || actionPopup || catchEvent ? '기다려주세요...' : '주사위 굴리기')}
             </button>
           </div>
@@ -634,34 +860,34 @@ export default function App() {
       )}
 
       <div className={`w-full max-w-6xl p-8 md:p-14 rounded-[3rem] shadow-[0_30px_60px_-15px_rgba(0,0,0,0.8)] flex flex-wrap gap-4 md:gap-5 justify-center relative z-10 border-[16px] border-[#4a2e15] bg-[#e8dcc4] overflow-hidden ${gameState === 'lobby' ? 'mb-24' : ''}`}>
-        
+
         <div className="absolute inset-0 pointer-events-none opacity-20 z-0">
-            <div className="absolute top-1/2 left-0 w-full h-[3px] bg-[#4a2e15]"></div>
-            <div className="absolute top-0 left-1/2 w-[3px] h-full bg-[#4a2e15]"></div>
+          <div className="absolute top-1/2 left-0 w-full h-[3px] bg-[#4a2e15]"></div>
+          <div className="absolute top-0 left-1/2 w-[3px] h-full bg-[#4a2e15]"></div>
         </div>
-        
+
         <div className="absolute inset-0 pointer-events-none opacity-[0.04] z-0 bg-[radial-gradient(#000_2px,transparent_2px)] [background-size:20px_20px]"></div>
 
         {BOARD_DATA.map((cell, idx) => {
           const isPlayerHere = playerPos === idx;
           const isAiHere = aiPos === idx;
-          
+
           let baseStyle = "w-20 h-24 md:w-[120px] md:h-[140px] rounded-2xl flex flex-col items-center justify-center relative transform transition-all duration-300 hover:-translate-y-2 z-10 group";
           let cellStyle = "";
-          
+
           if (cell.type === 'normal') {
-              cellStyle = `${baseStyle} bg-[#fdfbf7] border-[3px] border-[#d4bca3] shadow-[0_8px_0_0_#bca38f,0_15px_10px_rgba(0,0,0,0.2)] cursor-pointer hover:border-emerald-400 hover:shadow-[0_8px_0_0_#10b981,0_15px_10px_rgba(0,0,0,0.2)]`; 
+            cellStyle = `${baseStyle} bg-[#fdfbf7] border-[3px] border-[#d4bca3] shadow-[0_8px_0_0_#bca38f,0_15px_10px_rgba(0,0,0,0.2)] cursor-pointer hover:border-emerald-400 hover:shadow-[0_8px_0_0_#10b981,0_15px_10px_rgba(0,0,0,0.2)]`;
           } else if (cell.type === 'start') {
-              cellStyle = `${baseStyle} bg-gradient-to-b from-amber-200 to-amber-400 border-[3px] border-amber-500 shadow-[0_8px_0_0_#b45309,0_15px_10px_rgba(0,0,0,0.2)]`;
+            cellStyle = `${baseStyle} bg-gradient-to-b from-amber-200 to-amber-400 border-[3px] border-amber-500 shadow-[0_8px_0_0_#b45309,0_15px_10px_rgba(0,0,0,0.2)]`;
           } else if (cell.type === 'finish') {
-              cellStyle = `${baseStyle} bg-gradient-to-b from-rose-400 to-rose-600 border-[3px] border-rose-700 shadow-[0_8px_0_0_#9f1239,0_15px_10px_rgba(0,0,0,0.2)]`;
+            cellStyle = `${baseStyle} bg-gradient-to-b from-rose-400 to-rose-600 border-[3px] border-rose-700 shadow-[0_8px_0_0_#9f1239,0_15px_10px_rgba(0,0,0,0.2)]`;
           } else if (cell.type === 'action') {
-              let actionColor = cell.action === 'rest' 
-                                ? 'bg-blue-100 border-blue-300 shadow-[0_8px_0_0_#93c5fd,0_15px_10px_rgba(0,0,0,0.2)]' 
-                                : cell.action === 'forward2' 
-                                  ? 'bg-green-100 border-green-300 shadow-[0_8px_0_0_#86efac,0_15px_10px_rgba(0,0,0,0.2)]' 
-                                  : 'bg-red-100 border-red-300 shadow-[0_8px_0_0_#fca5a5,0_15px_10px_rgba(0,0,0,0.2)]';
-              cellStyle = `${baseStyle} ${actionColor} border-[3px]`;
+            let actionColor = cell.action === 'rest'
+              ? 'bg-blue-100 border-blue-300 shadow-[0_8px_0_0_#93c5fd,0_15px_10px_rgba(0,0,0,0.2)]'
+              : cell.action === 'forward2'
+                ? 'bg-green-100 border-green-300 shadow-[0_8px_0_0_#86efac,0_15px_10px_rgba(0,0,0,0.2)]'
+                : 'bg-red-100 border-red-300 shadow-[0_8px_0_0_#fca5a5,0_15px_10px_rgba(0,0,0,0.2)]';
+            cellStyle = `${baseStyle} ${actionColor} border-[3px]`;
           }
 
           return (
@@ -686,7 +912,7 @@ export default function App() {
                   <div className="text-xl md:text-2xl font-black text-[#5c3a21] bg-[#e8dcc4] border-2 border-[#d4bca3] px-3 py-0.5 rounded-full shadow-inner mt-1">{cell.count}</div>
                 </>
               )}
-              
+
               {cell.type === 'action' && (
                 <div className="text-[11px] md:text-sm font-black text-center whitespace-pre-line p-1 text-slate-700 drop-shadow-sm leading-tight">
                   {cell.label}
@@ -698,7 +924,7 @@ export default function App() {
                   {cell.label}
                 </div>
               )}
-              
+
               <div className="absolute -bottom-3 right-2 md:right-3 w-6 h-6 md:w-8 md:h-8 bg-[#5c3a21] text-[#e8dcc4] rounded-full flex items-center justify-center text-[10px] md:text-sm font-black shadow-[0_4px_0_0_rgba(0,0,0,0.3)] border-2 border-[#e8dcc4] z-20">
                 {idx}
               </div>
@@ -709,17 +935,102 @@ export default function App() {
 
       {gameState === 'lobby' && (
         <div className="fixed bottom-10 left-1/2 -translate-x-1/2 z-50">
-           <button 
-              onClick={() => {
-                if ('speechSynthesis' in window) {
-                   window.speechSynthesis.speak(new SpeechSynthesisUtterance(''));
-                }
-                setGameState('rps');
-              }} 
-              className="px-8 py-4 bg-amber-500 hover:bg-amber-400 text-white rounded-full font-black text-2xl md:text-3xl shadow-[0_8px_0_0_rgba(180,83,9,1)] active:shadow-none active:translate-y-2 transition-all flex items-center gap-3 border-4 border-white animate-bounce"
-           >
-              🚀 게임 시작하기!
-           </button>
+          <button
+            onClick={() => {
+              if ('speechSynthesis' in window) {
+                window.speechSynthesis.speak(new SpeechSynthesisUtterance(''));
+              }
+              setGameState('rps');
+            }}
+            className="px-8 py-4 bg-amber-500 hover:bg-amber-400 text-white rounded-full font-black text-2xl md:text-3xl shadow-[0_8px_0_0_rgba(180,83,9,1)] active:shadow-none active:translate-y-2 transition-all flex items-center gap-3 border-4 border-white animate-bounce"
+          >
+            🚀 게임 시작하기!
+          </button>
+        </div>
+      )}
+
+      {/* 그림 클릭 미리보기 팝업 (쓰기 연습용) */}
+      {previewCell && (
+        <div
+          className="fixed inset-0 bg-black/60 flex items-center justify-center z-[80] p-4 backdrop-blur-sm"
+          onClick={() => setPreviewCell(null)}
+        >
+          <div
+            className="bg-white rounded-[2rem] p-6 md:p-10 max-w-2xl w-full text-center shadow-2xl border-8 border-purple-400"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex justify-center items-end gap-4 mb-6">
+              <span className="text-7xl drop-shadow-md">{previewCell.emoji}</span>
+              <span className="text-5xl font-black text-purple-600 bg-purple-50 px-3 py-1 rounded-xl shadow-sm">x {previewCell.count}</span>
+            </div>
+
+            <p className="text-sm font-bold text-purple-500 uppercase tracking-widest mb-2">쓰기 연습용 미리보기</p>
+
+            {(() => {
+              const t = buildTask(previewCell);
+              const keys = [...keyWordsOf(t.answer), ...keyWordsOf(t.question)];
+              const qTokens = t.question.replace('?', ' ?').split(/\s+/).filter(Boolean).map(w => ({ word: w }));
+              const aTokens = (t.answer + '.').replace('.', ' .').split(/\s+/).filter(Boolean).map(w => ({ word: w }));
+              return (
+                <div className="space-y-5 my-6">
+                  <div className="bg-blue-50/40 rounded-2xl p-4 border-2 border-blue-100">
+                    <p className="text-xs font-bold text-blue-500 mb-2">질문 (Question)</p>
+                    <FourLineText tokens={qTokens} highlightWords={keys} onWordClick={speakWord} />
+                  </div>
+                  <div className="bg-emerald-50/40 rounded-2xl p-4 border-2 border-emerald-100">
+                    <p className="text-xs font-bold text-emerald-600 mb-2">대답 (Answer)</p>
+                    <FourLineText tokens={aTokens} highlightWords={keys} onWordClick={speakWord} />
+                  </div>
+                </div>
+              );
+            })()}
+
+            <div className="flex flex-wrap gap-3 justify-center mb-4">
+              <button
+                onClick={() => {
+                  const t = buildTask(previewCell);
+                  speakText(`${t.question} ${t.answer}.`);
+                }}
+                className="px-5 py-3 bg-blue-500 hover:bg-blue-400 text-white rounded-xl font-black shadow-md"
+              >
+                🔊 전체 듣기
+              </button>
+              <button
+                onClick={() => {
+                  const t = buildTask(previewCell);
+                  speakText(t.question);
+                }}
+                className="px-5 py-3 bg-sky-400 hover:bg-sky-300 text-white rounded-xl font-black shadow-md"
+              >
+                🔊 질문만
+              </button>
+              <button
+                onClick={() => {
+                  const t = buildTask(previewCell);
+                  speakText(t.answer + '.');
+                }}
+                className="px-5 py-3 bg-emerald-500 hover:bg-emerald-400 text-white rounded-xl font-black shadow-md"
+              >
+                🔊 대답만
+              </button>
+              <button
+                onClick={() => setPreviewCell(null)}
+                className="px-5 py-3 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded-xl font-black shadow-md"
+              >
+                닫기
+              </button>
+            </div>
+
+            <p className="text-xs text-slate-400">💡 단어를 클릭하면 그 단어만 듣고 뜻을 볼 수 있어요.</p>
+          </div>
+        </div>
+      )}
+
+      {/* 단어 뜻 툴팁 */}
+      {wordTip && (
+        <div className="fixed top-6 left-1/2 -translate-x-1/2 z-[120] bg-slate-900 text-white px-5 py-3 rounded-2xl shadow-2xl border-2 border-amber-400 animate-[fadeIn_0.2s_ease-out]">
+          <span className="font-black text-amber-300 mr-2">{wordTip.word}</span>
+          <span className="text-base">{wordTip.meaning || '뜻이 사전에 없어요'}</span>
         </div>
       )}
 
@@ -733,12 +1044,12 @@ export default function App() {
               {catchEvent.victim === 'ai' ? '잡았다!' : '앗, 잡혔다!'}
             </h2>
             <p className="text-xl font-bold text-gray-700 mb-8">
-              {catchEvent.victim === 'ai' 
-                ? '내가 AI를 잡았어요!\nAI는 출발선으로 돌아갑니다.' 
+              {catchEvent.victim === 'ai'
+                ? '내가 AI를 잡았어요!\nAI는 출발선으로 돌아갑니다.'
                 : 'AI에게 잡히고 말았어요!\n출발선으로 돌아갑니다.'}
             </p>
-            <button 
-              onClick={handleCatchClose} 
+            <button
+              onClick={handleCatchClose}
               className="w-full py-4 text-white bg-orange-500 hover:bg-orange-400 rounded-2xl font-black text-2xl transition-transform active:translate-y-2 border-b-8 border-orange-700"
             >
               알겠어요! 👍
@@ -759,10 +1070,10 @@ export default function App() {
             <p className="text-xl font-bold text-gray-700 mb-8">
               {getActionMessage()?.desc}
             </p>
-            <button 
-              onClick={handleActionPopupClose} 
+            <button
+              onClick={handleActionPopupClose}
               className={`w-full py-4 text-white rounded-2xl font-black text-2xl transition-transform active:translate-y-2
-                ${actionPopup.action === 'rest' ? 'bg-blue-500 border-b-8 border-blue-700' : 
+                ${actionPopup.action === 'rest' ? 'bg-blue-500 border-b-8 border-blue-700' :
                   actionPopup.action === 'forward2' ? 'bg-green-500 border-b-8 border-green-700' : 'bg-red-500 border-b-8 border-red-700'}`}
             >
               알겠어요! 👍
@@ -778,45 +1089,45 @@ export default function App() {
             <div className="absolute -bottom-10 -left-10 w-32 h-32 bg-pink-300 rounded-full mix-blend-multiply filter blur-xl opacity-70"></div>
 
             {rpsState === 'idle' && (
-               <div className="relative z-10">
-                 <h2 className="text-3xl font-black mb-4 text-emerald-800">누가 먼저 할까요?</h2>
-                 <p className="text-emerald-600 font-bold mb-8">가위바위보로 먼저 시작할 사람을 정해요!</p>
-                 <div className="flex justify-center gap-4">
-                   <button onClick={() => handleRPS('scissors')} className="text-5xl hover:scale-110 transition-transform bg-white p-5 rounded-2xl border-4 border-emerald-200 shadow-[0_8px_0_0_rgba(167,243,208,1)] active:shadow-none active:translate-y-2">✌️</button>
-                   <button onClick={() => handleRPS('rock')} className="text-5xl hover:scale-110 transition-transform bg-white p-5 rounded-2xl border-4 border-emerald-200 shadow-[0_8px_0_0_rgba(167,243,208,1)] active:shadow-none active:translate-y-2">✊</button>
-                   <button onClick={() => handleRPS('paper')} className="text-5xl hover:scale-110 transition-transform bg-white p-5 rounded-2xl border-4 border-emerald-200 shadow-[0_8px_0_0_rgba(167,243,208,1)] active:shadow-none active:translate-y-2">🖐️</button>
-                 </div>
-               </div>
+              <div className="relative z-10">
+                <h2 className="text-3xl font-black mb-4 text-emerald-800">누가 먼저 할까요?</h2>
+                <p className="text-emerald-600 font-bold mb-8">가위바위보로 먼저 시작할 사람을 정해요!</p>
+                <div className="flex justify-center gap-4">
+                  <button onClick={() => handleRPS('scissors')} className="text-5xl hover:scale-110 transition-transform bg-white p-5 rounded-2xl border-4 border-emerald-200 shadow-[0_8px_0_0_rgba(167,243,208,1)] active:shadow-none active:translate-y-2">✌️</button>
+                  <button onClick={() => handleRPS('rock')} className="text-5xl hover:scale-110 transition-transform bg-white p-5 rounded-2xl border-4 border-emerald-200 shadow-[0_8px_0_0_rgba(167,243,208,1)] active:shadow-none active:translate-y-2">✊</button>
+                  <button onClick={() => handleRPS('paper')} className="text-5xl hover:scale-110 transition-transform bg-white p-5 rounded-2xl border-4 border-emerald-200 shadow-[0_8px_0_0_rgba(167,243,208,1)] active:shadow-none active:translate-y-2">🖐️</button>
+                </div>
+              </div>
             )}
 
             {(rpsState === 'animating' || rpsState === 'result') && (
-               <div className="flex flex-col items-center relative z-10">
-                  <h2 className="text-3xl font-black mb-8 text-amber-500 animate-pulse">가위~ 바위~ 보!</h2>
-                  
-                  <div className="flex justify-center items-center gap-6 mb-8 w-full px-4">
-                     <div className="flex flex-col items-center flex-1">
-                        <span className="text-slate-500 mb-2 font-bold text-lg">👦 나</span>
-                        <div className="text-6xl bg-blue-50 w-full py-6 rounded-3xl border-4 border-blue-200 shadow-inner">
-                           {RPS_EMOJI[playerChoice]}
-                        </div>
-                     </div>
-                     <div className="text-3xl font-black text-slate-300 italic">VS</div>
-                     <div className="flex flex-col items-center flex-1">
-                        <span className="text-slate-500 mb-2 font-bold text-lg">🤖 AI</span>
-                        <div className="text-6xl bg-red-50 w-full py-6 rounded-3xl border-4 border-red-200 shadow-inner">
-                           {aiChoice ? RPS_EMOJI[aiChoice] : '❓'}
-                        </div>
-                     </div>
-                  </div>
+              <div className="flex flex-col items-center relative z-10">
+                <h2 className="text-3xl font-black mb-8 text-amber-500 animate-pulse">가위~ 바위~ 보!</h2>
 
-                  {rpsState === 'result' && (
-                     <div className="text-2xl font-black mt-4 animate-bounce bg-amber-100 py-3 px-6 rounded-full text-amber-800 border-2 border-amber-300 shadow-lg">
-                        {rpsResult === 'draw' ? '앗, 비겼다! 다시! 😅' : 
-                         rpsResult === 'win' ? '🎉 내가 이겼다! 먼저 시작! 🎉' : 
-                         '😭 AI 승리! AI가 먼저 시작! 😭'}
-                     </div>
-                  )}
-               </div>
+                <div className="flex justify-center items-center gap-6 mb-8 w-full px-4">
+                  <div className="flex flex-col items-center flex-1">
+                    <span className="text-slate-500 mb-2 font-bold text-lg">👦 나</span>
+                    <div className="text-6xl bg-blue-50 w-full py-6 rounded-3xl border-4 border-blue-200 shadow-inner">
+                      {RPS_EMOJI[playerChoice]}
+                    </div>
+                  </div>
+                  <div className="text-3xl font-black text-slate-300 italic">VS</div>
+                  <div className="flex flex-col items-center flex-1">
+                    <span className="text-slate-500 mb-2 font-bold text-lg">🤖 AI</span>
+                    <div className="text-6xl bg-red-50 w-full py-6 rounded-3xl border-4 border-red-200 shadow-inner">
+                      {aiChoice ? RPS_EMOJI[aiChoice] : '❓'}
+                    </div>
+                  </div>
+                </div>
+
+                {rpsState === 'result' && (
+                  <div className="text-2xl font-black mt-4 animate-bounce bg-amber-100 py-3 px-6 rounded-full text-amber-800 border-2 border-amber-300 shadow-lg">
+                    {rpsResult === 'draw' ? '앗, 비겼다! 다시! 😅' :
+                      rpsResult === 'win' ? '🎉 내가 이겼다! 먼저 시작! 🎉' :
+                        '😭 AI 승리! AI가 먼저 시작! 😭'}
+                  </div>
+                )}
+              </div>
             )}
           </div>
         </div>
@@ -828,13 +1139,13 @@ export default function App() {
             <h2 className="text-3xl font-black mb-12 text-amber-600 drop-shadow-sm">
               {turn === 'player' ? '👦 내 차례!' : '🤖 AI 차례!'}
             </h2>
-            
+
             <div className="w-32 h-32 relative perspective-1000 mb-12 mx-auto">
-              <div 
+              <div
                 className="cube-container"
-                style={{ 
+                style={{
                   transform: diceTransform,
-                  transition: isRollingDice ? 'transform 1.5s cubic-bezier(0.2, 0.8, 0.2, 1)' : 'none' 
+                  transition: isRollingDice ? 'transform 1.5s cubic-bezier(0.2, 0.8, 0.2, 1)' : 'none'
                 }}
               >
                 <div className="dice-face face-front">{renderDots(1)}</div>
@@ -860,22 +1171,28 @@ export default function App() {
       {gameState === 'speaking' && currentTask && (
         <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4 backdrop-blur-sm">
           <div className="bg-white rounded-[2rem] p-6 md:p-10 max-w-lg w-full text-center shadow-2xl border-8 border-blue-400">
-            
+
             {currentTask.mode === 'qna' ? (
               <div className="mb-6 bg-blue-50 p-6 rounded-3xl border-2 border-blue-100 relative">
                 <div className="flex justify-center items-end gap-4 mb-4">
-                   <span className="text-7xl drop-shadow-md">{currentTask.cell.emoji}</span>
-                   <span className="text-5xl font-black text-blue-600 bg-white px-3 py-1 rounded-xl shadow-sm">x {currentTask.cell.count}</span>
+                  <span className="text-7xl drop-shadow-md">{currentTask.cell.emoji}</span>
+                  <span className="text-5xl font-black text-blue-600 bg-white px-3 py-1 rounded-xl shadow-sm">x {currentTask.cell.count}</span>
                 </div>
                 <h3 className="text-2xl font-black text-slate-800 leading-snug">
-                  그림에 맞는 <span className="text-blue-600 border-b-4 border-blue-300">질문</span>과 <span className="text-blue-600 border-b-4 border-blue-300">대답</span>을<br/>모두 말해보세요!
+                  그림에 맞는 <span className="text-blue-600 border-b-4 border-blue-300">질문</span>과 <span className="text-blue-600 border-b-4 border-blue-300">대답</span>을<br />모두 말해보세요!
                 </h3>
+                <button
+                  onClick={() => speakText(`${currentTask.question} ${currentTask.answer}.`)}
+                  className="mt-4 text-sm text-blue-700 bg-white border border-blue-200 hover:bg-blue-100 px-4 py-2 rounded-full font-bold shadow-sm"
+                >
+                  🔊 들어보며 연습
+                </button>
               </div>
             ) : (
               <div className="mb-6 bg-blue-50 p-6 rounded-3xl border-2 border-blue-100 relative">
                 <div className="flex justify-center items-end gap-4 mb-4">
-                   <span className="text-7xl drop-shadow-md">{currentTask.cell.emoji}</span>
-                   <span className="text-5xl font-black text-blue-600 bg-white px-3 py-1 rounded-xl shadow-sm">x {currentTask.cell.count}</span>
+                  <span className="text-7xl drop-shadow-md">{currentTask.cell.emoji}</span>
+                  <span className="text-5xl font-black text-blue-600 bg-white px-3 py-1 rounded-xl shadow-sm">x {currentTask.cell.count}</span>
                 </div>
                 <p className="text-blue-500 font-bold mb-2 uppercase tracking-wide">🤖 AI 친구의 질문:</p>
                 <h3 className="text-3xl font-black text-slate-800">"{currentTask.question}"</h3>
@@ -886,38 +1203,74 @@ export default function App() {
             )}
 
             <div className="mb-8">
-               <p className="text-lg font-bold text-slate-600 mb-4">
-                 {currentTask.mode === 'qna' ? '마이크를 누르고 질문과 대답을 모두 말해보세요!' : '마이크를 누르고 영어로 대답하세요!'}
-               </p>
-               <button 
-                  onClick={startListening}
-                  disabled={isListening || feedback.includes("Excellent")}
-                  className={`w-24 h-24 rounded-full text-4xl shadow-[0_8px_0_0_rgba(0,0,0,0.15)] flex items-center justify-center mx-auto transition-all 
+              <p className="text-lg font-bold text-slate-600 mb-4">
+                {currentTask.mode === 'qna' ? '마이크를 누르고 질문과 대답을 모두 말해보세요!' : '마이크를 누르고 영어로 대답하세요!'}
+              </p>
+              <button
+                onClick={startListening}
+                disabled={isListening || feedback.includes("Excellent") || feedback.includes("잘했어요")}
+                className={`w-24 h-24 rounded-full text-4xl shadow-[0_8px_0_0_rgba(0,0,0,0.15)] flex items-center justify-center mx-auto transition-all
                   ${isListening ? 'bg-red-500 text-white animate-pulse shadow-none translate-y-2' : 'bg-green-500 text-white hover:bg-green-400 active:shadow-none active:translate-y-2'}`}
-               >
-                  {isListening ? '🎙️' : '🎤'}
-               </button>
-               
-               {isListening && <p className="text-red-500 font-bold mt-6 animate-pulse">듣고 있어요... 🗣️</p>}
-               
-               {spokenText && (
-                 <div className="mt-6 p-4 bg-slate-50 rounded-2xl border-2 border-slate-200">
-                   <p className="text-xs text-slate-400 font-bold mb-1 uppercase">내가 한 말</p>
-                   <p className="text-xl font-black text-slate-800">"{spokenText}"</p>
-                 </div>
-               )}
-               
-               {feedback && (
-                 <div className={`mt-4 text-xl font-black py-3 px-4 rounded-xl border-2 ${feedback.includes('정답') ? 'text-green-700 bg-green-100 border-green-300' : 'text-rose-600 bg-rose-50 border-rose-200'}`}>
-                   {feedback}
-                 </div>
-               )}
+              >
+                {isListening ? '🎙️' : '🎤'}
+              </button>
+
+              {isListening && <p className="text-red-500 font-bold mt-6 animate-pulse">듣고 있어요... 🗣️</p>}
+
+              {/* 🔊 정답 미리 듣기 + 👀 정답 보기 */}
+              <div className="flex flex-wrap gap-2 justify-center mt-5">
+                <button
+                  onClick={() => {
+                    const text = currentTask.mode === 'qna'
+                      ? `${currentTask.question} ${currentTask.answer}.`
+                      : `${currentTask.answer}.`;
+                    speakText(text);
+                  }}
+                  className="px-4 py-2 bg-sky-100 hover:bg-sky-200 text-sky-800 rounded-full font-bold border-2 border-sky-200"
+                >
+                  🔊 정답 미리 듣기
+                </button>
+                <button
+                  onClick={() => setShowAnswer(s => !s)}
+                  className="px-4 py-2 bg-emerald-100 hover:bg-emerald-200 text-emerald-800 rounded-full font-bold border-2 border-emerald-200"
+                >
+                  {showAnswer ? '🙈 가리기' : '👀 답 보기'}
+                </button>
+              </div>
+
+              {showAnswer && (() => {
+                const keys = [...keyWordsOf(currentTask.answer), ...keyWordsOf(currentTask.question)];
+                const qTokens = currentTask.question.replace('?', ' ?').split(/\s+/).filter(Boolean).map(w => ({ word: w }));
+                const aTokens = (currentTask.answer + '.').replace('.', ' .').split(/\s+/).filter(Boolean).map(w => ({ word: w }));
+                return (
+                  <div className="mt-5 space-y-3">
+                    {currentTask.mode === 'qna' && (
+                      <div className="bg-blue-50/40 rounded-2xl p-3 border-2 border-blue-100">
+                        <FourLineText tokens={qTokens} highlightWords={keys} onWordClick={speakWord} />
+                      </div>
+                    )}
+                    <div className="bg-emerald-50/40 rounded-2xl p-3 border-2 border-emerald-100">
+                      <FourLineText tokens={aTokens} highlightWords={keys} onWordClick={speakWord} />
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {feedback && (
+                <div className={`mt-4 text-xl font-black py-3 px-4 rounded-xl border-2 ${(feedback.includes('정답') || feedback.includes('잘했어요')) ? 'text-green-700 bg-green-100 border-green-300' : 'text-rose-600 bg-rose-50 border-rose-200'}`}>
+                  {feedback}
+                </div>
+              )}
+
+              {attempts > 0 && attempts < 3 && (
+                <p className="mt-2 text-xs text-slate-500">시도 {attempts}/3 — 3번 시도하면 자동으로 다음으로 넘어가요</p>
+              )}
             </div>
 
             <div className="flex justify-end pt-2">
-               <button onClick={skipSpeaking} className="text-slate-400 text-sm font-bold hover:text-slate-600 bg-slate-100 px-3 py-1 rounded-lg">
-                 PASS (선생님용)
-               </button>
+              <button onClick={skipSpeaking} className="text-slate-400 text-sm font-bold hover:text-slate-600 bg-slate-100 px-3 py-1 rounded-lg">
+                PASS (선생님용)
+              </button>
             </div>
           </div>
         </div>
@@ -926,7 +1279,7 @@ export default function App() {
       {gameState === 'aiSpeaking' && currentTask && (
         <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4 backdrop-blur-sm">
           <div className="bg-white rounded-[2rem] p-6 md:p-10 max-w-lg w-full text-center shadow-2xl border-8 border-red-400">
-            
+
             <div className="flex flex-col items-center mb-6">
               <div className="w-24 h-24 bg-red-100 rounded-full border-4 border-red-500 flex items-center justify-center text-6xl mb-4 shadow-lg animate-bounce">
                 🤖
@@ -936,15 +1289,15 @@ export default function App() {
 
             <div className="mb-6 bg-slate-50 p-6 rounded-3xl border-2 border-slate-200 relative">
               <div className="flex justify-center items-end gap-4 mb-6 opacity-50">
-                 <span className="text-5xl">{currentTask.cell.emoji}</span>
-                 <span className="text-3xl font-black text-slate-500">x {currentTask.cell.count}</span>
+                <span className="text-5xl">{currentTask.cell.emoji}</span>
+                <span className="text-3xl font-black text-slate-500">x {currentTask.cell.count}</span>
               </div>
-              
+
               <div className="bg-white p-6 rounded-2xl border-2 border-red-200 shadow-md relative">
-                 <div className="absolute -top-3 left-1/2 -translate-x-1/2 w-6 h-6 bg-white border-t-2 border-l-2 border-red-200 rotate-45"></div>
-                 <p className="text-3xl font-black text-slate-800 transition-all duration-300">
-                   {aiSpeechText}
-                 </p>
+                <div className="absolute -top-3 left-1/2 -translate-x-1/2 w-6 h-6 bg-white border-t-2 border-l-2 border-red-200 rotate-45"></div>
+                <p className="text-2xl md:text-3xl font-black text-slate-800 transition-all duration-300">
+                  {aiSpeechText}
+                </p>
               </div>
             </div>
 
